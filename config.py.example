@@ -1,0 +1,5 @@
+# Rename this file to config.py and add your actual credentials
+
+OPENAI_API_KEY = "your-openai-api-key"
+GOOGLE_DRIVE_CREDENTIALS = "path/to/credentials.json"
+DRIVE_FOLDER_ID = "your-google-drive-folder-id" 

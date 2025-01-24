@@ -1,0 +1,17 @@
+# Environment and credentials
+venv/
+.env
+config.py
+credentials.json
+client_secrets.json
+
+# Generated files
+__pycache__/
+*.pyc
+.DS_Store
+faiss_index/
+event_summaries.json
+
+# IDE files
+.vscode/
+.idea/ 
