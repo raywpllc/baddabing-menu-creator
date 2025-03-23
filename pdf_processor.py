@@ -1,5 +1,5 @@
-from pydrive2.auth import GoogleAuth
-from pydrive2.drive import GoogleDrive
+from PyDrive2.auth import GoogleAuth
+from PyDrive2.drive import GoogleDrive
 import PyPDF2
 import io
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -58,7 +58,10 @@ class PDFProcessor:
         # Save the current credentials
         self.gauth.SaveCredentialsFile("credentials.json")
         self.drive = GoogleDrive(self.gauth)
-        self.embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            openai_api_key=OPENAI_API_KEY
+        )
 
     def extract_pricing_details(self, text):
         """Extract detailed pricing breakdown with line item associations"""
@@ -347,8 +350,71 @@ class PDFProcessor:
         
         return details
 
+    def extract_food_items(self, text):
+        """Extract individual food items with their descriptions"""
+        food_items = []
+        lines = text.split('\n')
+        current_item = None
+        current_description = []
+        menu_section = None
+        
+        # Patterns to identify menu sections and items
+        section_pattern = r'^(?:menu|breakfast|lunch|dinner|appetizers?|entree?s|desserts?|beverages?|hors\s+d\'oeuvres)s?:?\s*$'
+        
+        # Pattern to identify likely food item headers (capitalized, no pricing)
+        item_header_pattern = r'^[A-Z][A-Za-z\s&-]+$'
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                # Process any pending item before moving on
+                if current_item and current_description:
+                    food_items.append({
+                        'name': current_item,
+                        'description': ' '.join(current_description),
+                        'section': menu_section,
+                        'source_text': f"{current_item}\n{' '.join(current_description)}"
+                    })
+                    current_item = None
+                    current_description = []
+                continue
+            
+            # Check for menu section headers
+            if re.match(section_pattern, line, re.I):
+                menu_section = line.strip(':').title()
+                continue
+            
+            # Check if this line looks like a food item header
+            if re.match(item_header_pattern, line) and len(line) > 3 and not any(char.isdigit() for char in line):
+                # Process any pending item before starting new one
+                if current_item and current_description:
+                    food_items.append({
+                        'name': current_item,
+                        'description': ' '.join(current_description),
+                        'section': menu_section,
+                        'source_text': f"{current_item}\n{' '.join(current_description)}"
+                    })
+                current_item = line
+                current_description = []
+            elif current_item:
+                # If we have a current item, this line is part of its description
+                # Ignore lines that look like pricing
+                if not re.match(r'^[\s]*\$?\d+', line) and not re.match(r'^total|^tax|^service', line.lower()):
+                    current_description.append(line)
+        
+        # Don't forget to add the last item if there is one
+        if current_item and current_description:
+            food_items.append({
+                'name': current_item,
+                'description': ' '.join(current_description),
+                'section': menu_section,
+                'source_text': f"{current_item}\n{' '.join(current_description)}"
+            })
+        
+        return food_items
+
     def create_documents(self, event_details):
-        """Create documents with enhanced metadata"""
+        """Create documents with enhanced metadata including individual food items"""
         documents = []
         
         # Create main event document
@@ -446,6 +512,32 @@ Menu Items:
         )
         documents.append(details_doc)
         
+        # Add new documents for individual food items
+        food_items = self.extract_food_items(event_details["full_text"])
+        
+        for item in food_items:
+            item_doc = Document(
+                page_content=f"""
+Food Item: {item['name']}
+Section: {item['section'] or 'General Menu'}
+Description: {item['description']}
+
+This item appeared in the menu for: {event_details['event_name']}
+Event Date: {event_details['date'] or 'Not specified'}
+Event Type: {item['section'] or 'Not specified'}
+""",
+                metadata={
+                    "document_type": "food_item",
+                    "item_name": item['name'],
+                    "menu_section": item['section'],
+                    "source_event": event_details['event_name'],
+                    "event_date": event_details['date'],
+                    "full_description": item['description'],
+                    "original_text": item['source_text']
+                }
+            )
+            documents.append(item_doc)
+        
         return documents
 
     def extract_text_from_pdf(self, file):
@@ -490,6 +582,7 @@ Menu Items:
         
         all_documents = []
         event_summaries = []
+        food_item_catalog = []  # New list to track all food items
         
         for pdf_file in pdf_files:
             print(f"Processing file: {pdf_file['title']}")
@@ -500,27 +593,41 @@ Menu Items:
                     documents = self.create_documents(event_details)
                     all_documents.extend(documents)
                     
+                    # Extract and catalog food items
+                    food_items = self.extract_food_items(text)
+                    food_item_catalog.extend([{
+                        "item_name": item['name'],
+                        "description": item['description'],
+                        "section": item['section'],
+                        "source_event": event_details['event_name'],
+                        "event_date": event_details['date']
+                    } for item in food_items])
+                    
                     # Create summary for this event
                     summary = {
                         "event_name": event_details["event_name"],
                         "date": event_details["date"],
                         "prices": event_details["prices"],
                         "guest_count": event_details["guest_count"],
-                        "menu_items": event_details["menu_items"]
+                        "menu_items": event_details["menu_items"],
+                        "food_items": food_items  # Add individual food items to summary
                     }
                     event_summaries.append(summary)
                     
                     print(f"Created {len(documents)} documents for {pdf_file['title']}")
-                    print(f"Found prices: {event_details['prices']}")
+                    print(f"Found {len(food_items)} individual food items")
             except Exception as e:
                 print(f"Error processing {pdf_file['title']}: {str(e)}")
         
         if not all_documents:
             raise Exception("No documents were created from the PDF files")
         
-        # Save event summaries
+        # Save event summaries and food item catalog
         with open('event_summaries.json', 'w') as f:
             json.dump(event_summaries, f, indent=2)
+        
+        with open('food_items_catalog.json', 'w') as f:
+            json.dump(food_item_catalog, f, indent=2)
         
         # Add base pricing document
         base_pricing_doc = Document(

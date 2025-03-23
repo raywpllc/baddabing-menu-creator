@@ -2,6 +2,9 @@ streamlit
 langchain
 openai
 faiss-cpu
-pydrive2
+PyDrive2==1.21.3
 PyPDF2
-python-dotenv 
+python-dotenv
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib 
